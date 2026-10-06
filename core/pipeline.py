@@ -12,6 +12,7 @@ Order matters:
 import os
 from collections import defaultdict
 from pathlib import Path
+from utils.partial import _is_partial
 
 from config import settings
 from utils import (
@@ -96,6 +97,9 @@ def _rename_with_ai_assist(file_path: Path) -> Path:
 
 
 def process_downloads_file(file_path: Path):
+    if _is_partial(file_path):
+        return
+    
     if not file_path.exists() or not file_path.is_file():
         return
 
@@ -128,6 +132,9 @@ def process_downloads_file(file_path: Path):
 
 def process_media_file(file_path: Path):
     """Used for both Pictures and Videos folders."""
+    if _is_partial(file_path):
+        return
+    
     if not file_path.exists() or not file_path.is_file():
         return
 

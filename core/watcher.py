@@ -5,6 +5,8 @@ Reacts instantly to new/modified files — no polling.
 
 import threading
 import time
+from pathlib import Path
+from utils.partial import _is_partial
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -17,6 +19,23 @@ from utils.logger import log_action
 # Small delay before processing, so we don't grab a file mid-write (e.g. large downloads)
 SETTLE_SECONDS = 2
 
+def _wait_until_stable(path: Path, checks: int = 3, interval: float = 1.0) -> bool:
+    """True once the file size is unchanged for `checks` consecutive polls."""
+    last, stable = -1, 0
+    while stable < checks:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return False  # vanished (e.g. browser renamed it) -> nothing to do
+        stable = stable + 1 if size == last else 0
+        last = size
+        time.sleep(interval)
+    return True
+
+def _process_when_ready(func, path: Path):
+    if _is_partial(path) or not _wait_until_stable(path):
+        return
+    func(path)
 
 class DownloadsHandler(FileSystemEventHandler):
     def on_created(self, event):
@@ -28,10 +47,14 @@ class DownloadsHandler(FileSystemEventHandler):
             self._handle(event.dest_path)
 
     def _handle(self, path):
-        threading.Timer(
-            SETTLE_SECONDS, pipeline.process_downloads_file, args=[_as_path(path)]
+        p = _as_path(path)
+        if _is_partial(p):
+            return
+        threading.Thread(
+            target=_process_when_ready,
+            args=(pipeline.process_downloads_file, p),
+            daemon=True,
         ).start()
-
 
 class MediaHandler(FileSystemEventHandler):
     def on_created(self, event):
@@ -43,8 +66,13 @@ class MediaHandler(FileSystemEventHandler):
             self._handle(event.dest_path)
 
     def _handle(self, path):
-        threading.Timer(
-            SETTLE_SECONDS, pipeline.process_media_file, args=[_as_path(path)]
+        p = _as_path(path)
+        if _is_partial(p):
+            return
+        threading.Thread(
+            target=_process_when_ready,
+            args=(pipeline.process_downloads_file, p),
+            daemon=True,
         ).start()
 
 
