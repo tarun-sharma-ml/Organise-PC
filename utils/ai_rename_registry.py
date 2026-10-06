@@ -19,13 +19,13 @@ already handled, never that we accidentally destroy user data.
 import json
 import threading
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 
 from config import settings
 
 _REGISTRY_FILE = settings.LOG_FOLDER / "ai_named_files.json"
 _LOCK = threading.Lock()
-_CACHE: Set[str] = None  # loaded lazily, kept in sync with disk on every mutation
+_CACHE: Optional[Set[str]] = None  # loaded lazily, kept in sync with disk on every mutation
 
 
 def _resolve(path: Path) -> str:
@@ -49,7 +49,8 @@ def _load() -> Set[str]:
 
 def _save() -> None:
     try:
-        _REGISTRY_FILE.write_text(json.dumps(sorted(_CACHE)), encoding="utf-8")
+        cache = _load()
+        _REGISTRY_FILE.write_text(json.dumps(sorted(cache)), encoding="utf-8")
     except OSError:
         pass  # best-effort — a failed write just means this survives one less restart
 
@@ -80,7 +81,7 @@ def forget(path: Path) -> None:
             _save()
 
 _DECLINED_FILE = settings.LOG_FOLDER / "ai_rename_declined.json"
-_DECLINED_CACHE: Set[str] = None
+_DECLINED_CACHE: Optional[Set[str]] = None
 
 
 def _load_declined() -> Set[str]:
@@ -97,7 +98,8 @@ def _load_declined() -> Set[str]:
 
 def _save_declined() -> None:
     try:
-        _DECLINED_FILE.write_text(json.dumps(sorted(_DECLINED_CACHE)), encoding="utf-8")
+        cache = _load_declined()
+        _DECLINED_FILE.write_text(json.dumps(sorted(cache)), encoding="utf-8")
     except OSError:
         pass
 
