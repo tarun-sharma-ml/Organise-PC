@@ -16,6 +16,7 @@ Automatically organizes, cleans, and maintains your **Downloads**, **Pictures**,
 | Excluded folders | Downloads | Folders you list (e.g. `Projects`) are never scanned, sorted, or renamed — not even read |
 | Paginated startup report | Console | Every launch shows what changed, 20 items at a time — press Enter for the next page, or `q` to stop |
 | Crash-resilient file ops | All of the above | A single locked/permission-denied file is logged and skipped — it no longer halts the entire run |
+| Partial-download protection | Downloads, Pictures, Videos | Browser temp files (`.crdownload`, `.part`, `.tmp`, ...) are never sorted, renamed, hashed, or extracted. A new file is only processed once its size has stopped changing, so in-progress downloads are left alone and finish with their real extension |
 | Single-instance lock | Whole suite | Only one copy can ever run at a time — a second launch exits immediately instead of running alongside the first |
 | AI-suggested renaming | Downloads | Reads file content and suggests a descriptive name, with your approval (dialog or Telegram). If you decline, the file keeps its **original name** and is never re-suggested — see "Declining a suggestion" below |
 | AI naming for scanned PDFs | Downloads | If a PDF has no real text layer (scanned/image-only), page 1 is rendered as an image and read by Gemini's vision input instead — see "AI-assisted renaming" below |
@@ -264,7 +265,20 @@ Startup shortcut → run_silent.vbs → run_forever.bat → pythonw.exe main.py
 ## Stopping the suite
 
 - If running in a visible terminal: `Ctrl+C`
-- If running silently via Startup: open Task Manager, end the `pythonw.exe` process
+- If running silently via Startup: stop the restart loop **first**, then the app. If you only end `pythonw.exe`, `run_forever.bat` relaunches it 5 seconds later:
+  ```powershell
+  Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" |
+    Where-Object { $_.CommandLine -like '*run_forever.bat*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
+  Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" |
+    Where-Object { $_.CommandLine -like '*main.py*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  ```
+- To pause auto-start while you edit code, rename the shortcut instead of deleting it (and rename it back afterwards):
+  ```powershell
+  Rename-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Organise_PC.lnk" "Organise_PC.lnk.disabled"
+  ```
 - If running via Docker: `docker compose down`
 
 ## Undoing a rename — `cleanup_rename.py`
@@ -292,7 +306,7 @@ pc-automation-suite/
 ├── config/
 │   └── settings.py            # All paths & feature toggles live here
 ├── core/
-│   ├── watcher.py             # Watchdog observers + paginated startup report
+│   ├── watcher.py             # Watchdog observers + paginated startup report; skips partial downloads and waits for file size to settle
 │   ├── pipeline.py            # Chains sort -> convert -> screenshot -> dedupe -> rename; per-folder duplicate scoping
 │   └── maintenance.py         # Scheduled disk/temp/large-file checks
 ├── utils/
@@ -307,6 +321,7 @@ pc-automation-suite/
 │   ├── approval_ui.py         # Windows Yes/No dialog for approving suggestions
 │   ├── telegram_bot.py        # Telegram-based approval (alternative to the dialog)
 │   ├── paginate.py            # 20-at-a-time console pagination
+│   ├── partial.py             # PARTIAL_EXTENSIONS + _is_partial(): identifies in-progress download/temp files
 │   └── logger.py
 ├── run_forever.bat             # Crash-restart loop: relaunches main.py via pythonw.exe if it ever exits
 ├── scripts/
@@ -344,6 +359,13 @@ The suite binds local port `54891` purely as a single-instance lock — nothing 
 2. Is `DRY_RUN` actually `False`? `Select-String -Path .\config\settings.py -Pattern "DRY_RUN ="` — if `True`, it only *logs* what it would do, nothing actually moves.
 3. Did you check too soon after launch? On startup, the suite runs a full sweep of your existing files *before* it starts live-watching for new ones — on a large Downloads folder this can take a while. Live watching has only begun once `logs\activity.log` shows a line like `Suite is running. Press Ctrl+C to stop`. A file created during the sweep itself may be missed by that particular run, but will be picked up by the *next* sweep (i.e. next launch) or the next matching live event.
 4. Check the tail of the log for the file's name directly: `Select-String -Path .\logs\activity.log -Pattern "your_file_name"`
+
+**A download ended up as a stray temp file instead of its real extension (or never moved).** This was a real bug, now fixed. Browsers write in-progress downloads under a temporary name (`.crdownload` in Chrome/Edge, `.part` in Firefox, `.tmp`, etc.) and rename it when finished. Previously the watcher processed every new file after a fixed 2-second delay, so a download still in progress got renamed to something like `file_crdownload_06102026.crdownload`; the browser then couldn't find its temp file and left it behind. Now:
+- `utils/partial.py` defines `PARTIAL_EXTENSIONS` (`.crdownload`, `.part`, `.partial`, `.tmp`, `.download`, `.opdownload`, `.!ut`) and `_is_partial()`, which also ignores Office lock files starting with `~$`.
+- `core/watcher.py` skips those names outright, and waits until a file's size is unchanged for several consecutive checks before handing it to the pipeline (replaces the old fixed 2-second delay).
+- `core/pipeline.py` applies the same check at the top of `process_downloads_file` and `process_media_file`, so the startup sweep can't touch leftover temp files either.
+- If your browser uses another temp extension, add it to `PARTIAL_EXTENSIONS` in `utils/partial.py`.
+- Leftover `*_crdownload_*.crdownload` files from before the fix are safe to delete.
 
 **Task Manager shows multiple `pythonw.exe` processes.** This is expected and not a bug — Windows can show 2-3 process entries for one logical launch (a launcher stub plus the real interpreter). Only one of them is ever actually doing work, guaranteed by the single-instance lock above. To find which PID is the real one:
 ```powershell
@@ -464,6 +486,8 @@ git diff core/pipeline.py
 - PDFs sort into `Downloads/Documents/pdf/`, alongside the other Documents sub-types — there's no separate top-level `PDFs/` folder anymore.
 - Auto-start now runs through `run_forever.bat`, which relaunches `main.py` automatically if it ever crashes or exits — see "Crash recovery" under Auto-start on login.
 - The Telegram bot's sent-message list (used by `/clearall`) is persisted to `logs/telegram_sent_messages.json`, so it survives restarts instead of only knowing about messages from the current run.
+- In-progress downloads are never touched: partial/temp extensions are skipped, and a file is only processed once its size has stopped changing. Both the live watcher and the startup sweep apply this (see Troubleshooting).
+- To stop the suite when it was auto-started, end the `run_forever.bat` `cmd.exe` process before `pythonw.exe`, otherwise it restarts itself — see "Stopping the suite".
 
 ## Recent changes
 
@@ -474,3 +498,4 @@ git diff core/pipeline.py
 | 2026-09 | PDFs now sort into `Documents/pdf/` instead of a separate top-level `PDFs/` folder | `config/settings.py` |
 | 2026-09 | Declining an AI rename suggestion now leaves the file's name untouched (instead of falling back to `Name_ext_date`) and is remembered forever, so the same file is never re-suggested — fixes repeat prompts after every restart | `core/pipeline.py`, `utils/ai_rename_registry.py`, `utils/telegram_bot.py` |
 | 2026-09 | `/clearall` now deletes messages across restarts, not just the current session, via a persisted sent-message list | `utils/telegram_bot.py` |
+| 2026-10 | Fixed downloads being left as stray temp files: partial-download extensions are now skipped, and files are only processed once their size is stable (replaces the fixed 2-second delay). Documented how to stop the suite despite the restart loop | `core/watcher.py`, `core/pipeline.py`, `utils/partial.py` (new), `README.md` |
